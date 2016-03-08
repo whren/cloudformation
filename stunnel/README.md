@@ -78,6 +78,48 @@
 
 ## Windows stunnel client conf
 
+1. Lancer le batch "generate_stunnel_client_conf.bat"
+  1. Renseigner les réponses aux questions
+  2. Les chemins ne doivent pas avoir de "\" de fin
+  3. Les chemins ne doivent contenir que des "\" en tant que séparateur d’arborescence
+  4. Sélectionner les certificats (.pem) adéquats (server/client)
+
+![Alt text](img/Windows stunnel client conf/1.jpg?raw=true)
+
+2. Le fichier stunnel.conf est généré et consultable à l’emplacement renseigné dans le script
+ 
+![Alt text](img/Windows stunnel client conf/2.jpg?raw=true)
+
+3. Le fichier stunnel.conf est à copier dans le répertoire d’installation de stunnel
+  1. Ecraser la configuration si nécessaire
+ 
+![Alt text](img/Windows stunnel client conf/3.jpg?raw=true)
+
+4. Dans stunnel
+  1. Menu configuration > reload configuration
+  2. Vérifier la mention de "Configuration successful"
+ 
+![Alt text](img/Windows stunnel client conf/4.jpg?raw=true)
+
+5. Lancer putty
+  1. Préciser le host et port renseignés en tant que "bind host" et "bind port" du batch "generate_stunnel_client_conf.bat"
+ 
+![Alt text](img/Windows stunnel client conf/5.jpg?raw=true)
+
+6. Aller dans le menu Connection > SSH > Auth
+  1. Renseigner le chemin vers le AWS key pair dans le champ "Private key file for authentication"
+  2. "Open"
+ 
+![Alt text](img/Windows stunnel client conf/6.jpg?raw=true)
+
+7. "Yes"
+
+![Alt text](img/Windows stunnel client conf/7.jpg?raw=true)
+
+8. Utiliser le user ec-2user
+  1. Le tunnel est accessible !
+
+![Alt text](img/Windows stunnel client conf/8.jpg?raw=true)
 
 ## Encapsulation de connexions au travers du tunnel SSH (TCP over SSH over SSL) avec Stunnel côté client
 
