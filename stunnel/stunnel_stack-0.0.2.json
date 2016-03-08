@@ -1,0 +1,396 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Metadata" : {
+    "AWS::CloudFormation::Interface" : {
+      "ParameterGroups" : [
+        {
+          "Label" : { "default" : "Stack configuration" },
+          "Parameters" : [ "prefixResourceName" ]
+        },
+        {
+          "Label" : { "default" : "Amazon EC2 Configuration" },
+          "Parameters" : [ "keyName", "regionName" ]
+        },
+        {
+          "Label" : { "default" : "Network Configuration" },
+          "Parameters" : [ "vpcID", "subnetID" ]
+        },
+        {
+          "Label" : { "default" : "Stunnel Configuration" },
+          "Parameters" : [ "stunnelCertificateS3bucketUpload" ]
+        }
+      ],
+      "ParameterLabels" : {
+        "prefixResourceName" : { "default" : "Which prefix will you use for resource creation name ?" },
+        "keyName" : { "default" : "Which key pair do you want to use ?" },
+        "regionName" : { "default" : "Which region should this be deployed to ?" },
+        "vpcID" : { "default" : "Which VPC should this be deployed to ?" },
+        "subnetID" : { "default" : "Which Subnet should this be deployed to ?" },
+        "stunnelCertificateS3bucketUpload" : { "default" : "Do you want stunnel certificate to be uploaded to S3 bucket ?" }
+      }
+    }
+  },
+  "Conditions" : {
+    "UploadToS3Bucket" : {"Fn::Equals" : [{"Ref" : "stunnelCertificateS3bucketUpload"}, "Yes"]}
+  },
+  "Resources": {
+    "InstanceRole": {
+       "Type":"AWS::IAM::Role",
+       "Properties": {
+          "AssumeRolePolicyDocument": {
+             "Statement": [
+                {
+                   "Effect": "Allow",
+                   "Principal": {
+                      "Service": [
+                         "ec2.amazonaws.com"
+                      ]
+                   },
+                   "Action": [
+                      "sts:AssumeRole"
+                   ]
+                }
+             ]
+          },
+          "Path": "/"
+       }
+    },
+    "RolePolicies": {
+       "Type":"AWS::IAM::Policy",
+       "Properties": {
+          "PolicyName": "S3Upload",
+          "PolicyDocument": {
+             "Statement": [
+                {
+                    "Action": [
+                      "s3:DeleteObject",
+                      "s3:GetObject",
+                      "s3:PutObject"
+                    ],
+                    "Effect" : "Allow",
+                    "Resource" : {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "arn:aws:s3:::",
+                          {
+                            "Ref": "prefixResourceName"
+                          },
+                          "-s3bucket",
+                          "/*"
+                        ]
+                      ]
+                    }
+                }
+             ]
+          },
+          "Roles": [
+             {
+                "Ref": "InstanceRole"
+             }
+          ]
+       }
+    },
+    "InstanceProfile": {
+       "Type":"AWS::IAM::InstanceProfile",
+       "Properties": {
+          "Path": "/",
+          "Roles": [
+             {
+                "Ref": "InstanceRole"
+             }
+          ]
+       }
+    },
+    "StunnelBucket": {
+      "Type" : "AWS::S3::Bucket",
+      "Condition" : "UploadToS3Bucket",
+      "Properties" : {
+        "AccessControl" : "Private",
+        "BucketName"  : {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "prefixResourceName"
+              },
+              "-s3bucket"
+            ]
+          ]
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+              {
+                "Id": "1 day expiration",
+                "Status": "Enabled",
+                "ExpirationInDays": "1"
+              }
+          ]
+        }
+      },
+      "DeletionPolicy" : "Delete"
+    },
+    "StunnelEC2Instance": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+         "AWS::CloudFormation::Authentication": {
+            "S3AccessCreds": {
+               "type": "S3",
+               "roleName": {
+                  "Ref": "InstanceRole"
+               }
+            }
+         }
+      },
+      "Properties": {
+        "DisableApiTermination": "false",
+        "InstanceInitiatedShutdownBehavior": "stop",
+        "ImageId": "ami-e1398992",
+        "InstanceType": "t2.nano",
+        "KeyName": {
+            "Ref": "keyName"
+        },
+        "Monitoring": "false",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Ref": "prefixResourceName"
+                  },
+                  "-EC2Instance"
+                ]
+              ]
+            }
+          }
+        ],
+        "NetworkInterfaces": [
+          {
+            "DeleteOnTermination": "true",
+            "DeviceIndex": 0,
+            "SubnetId": {
+              "Ref": "subnetID"
+            },
+            "GroupSet": [
+              {
+                "Ref": "sgstunnelsecuritygroup"
+              }
+            ],
+            "AssociatePublicIpAddress": "true"
+          }
+        ],
+        "IamInstanceProfile": {
+           "Ref": "InstanceProfile"
+        },
+        "UserData": {
+          "Fn::Base64": {
+              "Fn::Join": [
+                  "",
+                  [
+                      "#! /bin/bash\n",
+                      "rpm -qa | grep -qw stunnel || yum -y install stunnel\n",
+                      "rpm -qa | grep -qw aws-cfn-bootstrap || yum update -y aws-cfn-bootstrap\n",
+                      "\n",
+                      "EC2_INSTANCE_ID=\"$( wget -q -O - http://instance-data/latest/meta-data/instance-id || die \\\"wget instance-id has failed: $?\\\" )\"\n",
+                      "test -n \"$EC2_INSTANCE_ID\" || die 'cannot obtain instance-id'\n",
+                      "EC2_AVAIL_ZONE=\"$( wget -q -O - http://instance-data/latest/meta-data/placement/availability-zone || die \\\"wget availability-zone has failed: $?\\\" )\"\n",
+                      "test -n \"$EC2_AVAIL_ZONE\" || die 'cannot obtain availability-zone'\n",
+                      "EC2_REGION=\"$( echo \\\"$EC2_AVAIL_ZONE\\\" | sed -e 's:\\([0-9][0-9]*\\)[a-z]*$:\\\\\\1:' )\"\n",
+                      "\n",
+                      "BASE_FILE=aws-ami-stunnel_${EC2_INSTANCE_ID}_${EC2_AVAIL_ZONE}\n",
+                      "PEM_FILE=${BASE_FILE}.pem\n",
+                      "BASE_CLIENT_FILE=aws-ami-stunnel_client_${EC2_INSTANCE_ID}_${EC2_AVAIL_ZONE}\n",
+                      "PEM_CLIENT_FILE=${BASE_CLIENT_FILE}.pem\n",
+                      "\n",
+                      "sudo mkdir /var/lib/stunnel4\n",
+                      "sudo chown ec2-user:ec2-user /var/lib/stunnel4\n",
+                      "sudo mkdir /etc/stunnel/certs\n",
+                      "sudo chown ec2-user:ec2-user /etc/stunnel/certs\n",
+                      "\n",
+                      "sudo bash -c \"cat <<EOF > /etc/stunnel/stunnel.conf\n",
+                      "chroot = /var/lib/stunnel4/\n",
+                      "setuid = ec2-user\n",
+                      "setgid = ec2-user\n",
+                      "; PID is created inside the chroot jail\n",
+                      "pid = /stunnel4.pid\n",
+                      "\n",
+                      "client=no\n",
+                      "CAfile=/etc/stunnel/certs/${PEM_CLIENT_FILE}\n",
+                      "cert=/etc/stunnel/${PEM_FILE}\n",
+                      "verify=3\n",
+                      "debug=3\n",
+                      "sslVersion=all\n",
+                      "fips=no\n",
+                      "output=stunnel.log\n",
+                      "[aws-ssl-ssh]\n",
+                      "accept=443\n",
+                      "connect=22\n",
+                      "EOF\"\n",
+                      "\n",
+                      "cd /etc/stunnel\n",
+                      "sudo openssl req -new -out ${PEM_FILE} -keyout ${PEM_FILE} -nodes -x509 -days 365 -subj \"/C=FR/ST=Nantes/L=Nantes/O=NA/OU=NA/CN=aws\"\n",
+                      "cd certs\n",
+                      "sudo openssl req -new -out ${PEM_CLIENT_FILE} -keyout ${PEM_CLIENT_FILE} -nodes -x509 -days 365 -subj \"/C=FR/ST=Nantes/L=Nantes/O=NA/OU=NA/CN=aws\"\n",
+                      "cd ..\n",
+                      "\n",
+                      "sudo stunnel /etc/stunnel/stunnel.conf\n",
+                      {
+                        "Fn::If" : [
+                          "UploadToS3Bucket",
+                          {
+                            "Fn::Join": [
+                              "",
+                              [ 
+                                "aws s3 cp ${PEM_FILE} s3://",
+                                {"Ref" : "StunnelBucket"},
+                                "/${PEM_FILE}\n",
+                                "aws s3 cp certs/${PEM_CLIENT_FILE} s3://",
+                                {"Ref" : "StunnelBucket"},
+                                "/${PEM_CLIENT_FILE}\n"
+                              ]
+                            ]
+                          },
+                          ""
+                        ]
+                      },
+                      "/opt/aws/bin/cfn-signal -e 0 -r \"EC2 Instance created\" -i \"OK\" '", { "Ref" : "waitHandle" }, "'\n"
+                  ]
+              ]
+          }
+        }
+      }
+    },
+    "waitHandle" : {
+        "Type" : "AWS::CloudFormation::WaitConditionHandle",
+        "Properties" : {
+        }
+    },
+    "waitCondition" : {
+        "Type" : "AWS::CloudFormation::WaitCondition",
+        "DependsOn" : "StunnelEC2Instance",
+        "Properties" : {
+            "Handle" : { "Ref" : "waitHandle" },
+            "Timeout" : "4500"
+        }
+    },
+    "sgstunnelsecuritygroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Stunnel security group",
+        "VpcId": {
+            "Ref": "vpcID"
+        }
+      }
+    },
+    "ingress1": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "sgstunnelsecuritygroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": "22",
+        "ToPort": "22",
+        "CidrIp": "0.0.0.0/0"
+      }
+    },
+    "ingress2": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "sgstunnelsecuritygroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": "443",
+        "ToPort": "443",
+        "CidrIp": "0.0.0.0/0"
+      }
+    },
+    "egress1": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "sgstunnelsecuritygroup"
+        },
+        "IpProtocol": "-1",
+        "CidrIp": "0.0.0.0/0"
+      }
+    }
+  },
+  "Description": "stunnel with private key + certificate generated in /etc/stunnel/aws-ami-stunnel_<EC2_INSTANCE_ID>_<EC2_AVAIL_ZONE>.pem (optionaly uploaded to a new S3 bucket)",
+  "Outputs": {
+    "StunnelPublicDnsName": {
+        "Description": "Stunnel public dns name",
+        "Value": {
+              "Fn::GetAtt": [
+                  "StunnelEC2Instance",
+                  "PublicDnsName"
+              ]
+          }
+    },
+    "StunnelPublicIp": {
+        "Description": "Stunnel public ip",
+        "Value": {
+              "Fn::GetAtt": [
+                  "StunnelEC2Instance",
+                  "PublicIp"
+              ]
+          }
+    },
+    "BucketName": {
+        "Condition" : "UploadToS3Bucket",
+        "Value": {"Ref" : "StunnelBucket"},
+        "Description": "Name of the Amazon S3 bucket used to upload the certificate"
+    },
+    "BucketUrl": {
+        "Condition" : "UploadToS3Bucket",
+        "Value": {
+            "Fn::Join": [
+              "",
+              [ 
+                "https://console.aws.amazon.com/s3/home?region=",
+                { "Ref" : "AWS::Region" },
+                "&bucket=",
+                {"Ref" : "StunnelBucket"},
+                "&prefix="
+              ]
+            ]
+        },
+        "Description": "Url of the S3 bucket where the certificate has been uploaded. Expiracy set to 1 day."
+    }
+  },
+  "Parameters" : {
+    "prefixResourceName": {
+        "Default": "stunnel",
+        "Description": "The prefix to be used for resources creation in this stack !",
+        "Type": "String",
+        "AllowedPattern" : "[a-z\\-]+"
+    },
+    "keyName" : {
+      "Description" : "Amazon EC2 Key Pair name",
+      "Type" : "AWS::EC2::KeyPair::KeyName"
+    },
+    "regionName": {
+        "Default": "eu-west-1",
+        "Description": "The region to deploy the stack to. Defaults to eu-west-1 !",
+        "Type": "String"
+    },
+    "vpcID" : {
+      "Description" : "VPC ID",
+      "Type" : "AWS::EC2::VPC::Id"
+    },
+    "subnetID" : {
+      "Description" : "Subnet ID",
+      "Type" : "AWS::EC2::Subnet::Id"
+    },
+    "stunnelCertificateS3bucketUpload" : {
+      "Description" : "Stunnel certificate upload to a S3 Bucket",
+      "Type" : "String",
+      "Default" : "No",
+      "AllowedValues" : ["Yes", "No"]
+    }
+  }
+}
